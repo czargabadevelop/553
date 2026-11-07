@@ -80,6 +80,22 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
     }
   }, [nextGame]);
 
+  // Safety net for the rematch panel: readiness changes arrive instantly over
+  // the socket, and this slow poll guarantees the panel cannot stay stale.
+  const showingRematch = Boolean(results && rematch);
+
+  useEffect(() => {
+    if (!showingRematch || nextGame) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      router.reload({ only: ['rematch', 'next_game', 'seats'], preserveScroll: true });
+    }, 6000);
+
+    return () => clearInterval(timer);
+  }, [showingRematch, nextGame]);
+
   const initial = useMemo(() => {
     const layout = { back: [], middle: [], front: [] };
     cards.forEach((card, index) => {

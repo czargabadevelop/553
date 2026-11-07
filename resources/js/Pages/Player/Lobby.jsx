@@ -45,15 +45,16 @@ export default function Lobby({ rooms }) {
     return () => echo.leave('lobby');
   }, []);
 
-  // Fallback only: if the WebSocket client is unavailable, keep polling.
+  // Safety net: the socket gives instant updates, this slow poll guarantees the
+  // seat counts can never stay stale (missed event, dropped connection, etc.).
   useEffect(() => {
-    if (echo || !seatedInRoom || activeGame) {
+    if (!seatedInRoom || activeGame) {
       return undefined;
     }
 
     const timer = setInterval(() => {
       router.reload({ only: ['rooms'], preserveScroll: true, preserveState: true });
-    }, 4000);
+    }, 10000);
 
     return () => clearInterval(timer);
   }, [seatedInRoom, activeGame]);
