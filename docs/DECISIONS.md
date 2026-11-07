@@ -22,7 +22,8 @@ Options:
 | C | Fouled player is disqualified from the round and the match is voided/cancelled with reservations released. | no settlement, or fee-only |
 
 Recommended: **A**, with the foul reason stored per hand submission and an audit entry.
-State: **needs confirmation**.
+State: **adopted (option A)** — implemented in `RoundEvaluator` and covered by tests. A
+timed-out player is treated as a foul as well (see D11).
 
 ## D2 — Hand comparison rules the engine must encode (blocks Milestone 4)
 
@@ -36,13 +37,15 @@ Defaults taken from Pepito, the Philippine 13-card Chinese poker variant:
 - 3-card front hand: Three of a Kind > One Pair > High Card **only**. Three-card straights and
   flushes are **not** ranked (so `2-3-4` offsuit equals `2-3-4` suited) — matches §4.
 - Suits are **never** ranked, so a comparison can tie (tie = 0 game points).
-- Ordering check (foul): each hand's strength is compared within its own size class; any valid
-  5-card hand outranks any 3-card hand for the back/middle-vs-front ordering requirement.
+- Ordering check (foul): all hands are compared on the standard category ladder, even across
+  hand sizes. A front-hand trip (category 4) outranks a middle-hand two pair (category 3), so
+  that arrangement is a foul; a front trip under a middle straight is legal. This matches the
+  published mis-set example (three of a kind in front with only two pair in the middle).
 - No royalties, no scoop bonus, no special hands — matches §4 (add later only by explicit
   instruction).
 
-State: **confirm** (particularly the ace-low straight and suits-never-ranked rules, if the
-intended house rules differ).
+State: **adopted** (approved by the product owner; house-rule changes must be made in
+`HandEvaluator`/`FoulDetector` and covered by tests).
 
 ## D3 — Cash conversion rate (blocks Milestone 7)
 
@@ -103,6 +106,25 @@ Session cookies for web, Sanctum **personal access tokens** (not SPA cookie mode
 future Next.js + Capacitor client, same authorization policies in both. Tokens get scoped
 abilities (`read`, `play`, `wallet`).
 State: **confirm.**
+
+---
+
+## D11 — Arrangement timeout (implemented)
+
+A player who has not submitted when `games.arrangement_deadline_at` passes is auto-fouled
+(option A from D1): the server stores their dealt cards in deal order as the submission (5/5/3),
+marks the submission invalid with the reason *"Your hands were not submitted before the
+deadline."*, and evaluates the round. The other three players are scored normally.
+
+- Late submissions are rejected by `GameService::submit()` once the deadline has passed.
+- `POST /games/{game}/timeout` lets a seated player ask the server to resolve the round; the
+  server re-checks the deadline, so the client cannot force it early.
+- `php artisan games:resolve-expired` is scheduled every minute as a backstop for rounds where
+  every client disconnected.
+- The table shows a server-clock-anchored countdown and polls until results arrive.
+
+State: **adopted**. Timeout length stays configurable through
+`game.arrangement_timeout_seconds` (default 120).
 
 ---
 

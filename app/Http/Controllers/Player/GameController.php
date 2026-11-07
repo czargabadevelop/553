@@ -96,6 +96,9 @@ class GameController extends Controller
             'results' => $revealed ? $this->results($game) : null,
             'room_id' => $game->room_id,
             'next_game' => $nextGame,
+            // The countdown is computed against the server clock so a wrong
+            // device clock cannot mislead the player about the deadline.
+            'server_now' => now()->toIso8601String(),
             // Rematch state: the same seats stay at the table after a game, and
             // each player readies up again for the next round.
             'rematch' => $revealed ? [
@@ -114,6 +117,30 @@ class GameController extends Controller
                 'can_ready' => $seatByUser->get($user->id)?->status === RoomSeatStatus::Seated,
             ] : null,
         ]);
+    }
+
+    /**
+     * Resolve a round whose timer has expired. Only a seated player may ask,
+     * and the domain service verifies the deadline before doing anything; this
+     * just makes resolution instant instead of waiting for the next sweep.
+     */
+    public function resolveTimeout(Request $request, Game $game, GameService $games): RedirectResponse
+    {
+        abort_unless(
+            $game->players()->where('user_id', $request->user()->id)->exists(),
+            403,
+            'You are not seated at this table.',
+        );
+
+        try {
+            $resolved = $games->resolveDeadline($game);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
+        }
+
+        return $resolved === null
+            ? back()
+            : back()->with('success', 'The arrangement timer expired — the round was resolved.');
     }
 
     public function submit(Request $request, Game $game, GameService $games): RedirectResponse

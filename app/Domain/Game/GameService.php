@@ -39,6 +39,12 @@ use RuntimeException;
  */
 class GameService
 {
+    /**
+     * Stored on the player and the submission so the results screen explains
+     * exactly why the round was lost.
+     */
+    public const TIMEOUT_FOUL_REASON = 'Your hands were not submitted before the deadline.';
+
     public function __construct(
         private readonly RoundEvaluator $roundEvaluator,
         private readonly FoulDetector $foulDetector,
@@ -176,6 +182,12 @@ class GameService
                 throw new RuntimeException('This game is not accepting submissions.');
             }
 
+            // The deadline is enforced before the sweep job runs so a player
+            // cannot slip a hand in after the table's timer has expired.
+            if ($game->arrangement_deadline_at !== null && $game->arrangement_deadline_at->isPast()) {
+                throw new RuntimeException('The arrangement deadline has passed.');
+            }
+
             /** @var GamePlayer $player */
             $player = $game->players()->where('user_id', $user->id)->lockForUpdate()->firstOrFail();
 
@@ -256,6 +268,93 @@ class GameService
             }
 
             return $player->refresh();
+        });
+    }
+
+    /**
+     * Resolve a round whose arrangement deadline has passed. Players who never
+     * submitted are auto-fouled (decision D11), which keeps the table moving
+     * instead of leaving three players waiting forever on one absent player.
+     * Safe to call repeatedly: the game row lock and status check make it
+     * idempotent, and the scheduler uses it as a backstop.
+     */
+    public function resolveDeadline(Game $game): ?EvaluationResult
+    {
+        return DB::transaction(function () use ($game) {
+            $game = Game::query()->whereKey($game->id)->lockForUpdate()->firstOrFail();
+
+            if ($game->status !== GameStatus::Arranging) {
+                return null;
+            }
+
+            if ($game->arrangement_deadline_at === null || $game->arrangement_deadline_at->isFuture()) {
+                return null;
+            }
+
+            $players = $game->players()->with('submission')->get();
+            $missing = $players->filter(fn (GamePlayer $player) => $player->submission === null);
+
+            foreach ($missing as $player) {
+                $cards = GameCard::query()
+                    ->where('game_player_id', $player->id)
+                    ->orderBy('deal_order')
+                    ->get();
+
+                $hands = [
+                    'back' => $cards->slice(0, 5)->values(),
+                    'middle' => $cards->slice(5, 5)->values(),
+                    'front' => $cards->slice(10, 3)->values(),
+                ];
+
+                $codes = [];
+
+                foreach ($hands as $position => $positionCards) {
+                    $codes[$position] = $positionCards
+                        ->map(fn (GameCard $card) => Card::RANK_LABELS[$card->card_rank].$card->card_suit)
+                        ->all();
+
+                    $rank = $this->roundEvaluatorCategory(Card::fromCodes($codes[$position]));
+
+                    GameHand::create([
+                        'game_player_id' => $player->id,
+                        'position' => $position,
+                        'category' => $rank->category,
+                        'strength_key' => $rank->strengthKey(),
+                        'card_count' => count($codes[$position]),
+                    ]);
+
+                    GameCard::query()
+                        ->whereIn('id', $positionCards->pluck('id'))
+                        ->update(['position' => $position]);
+                }
+
+                GameHandSubmission::create([
+                    'game_player_id' => $player->id,
+                    'game_id' => $game->id,
+                    'hands' => $codes,
+                    'is_valid' => false,
+                    'foul_reason' => self::TIMEOUT_FOUL_REASON,
+                    'submitted_at' => now(),
+                ]);
+
+                $player->forceFill([
+                    'status' => GamePlayerStatus::Fouled,
+                    'is_fouled' => true,
+                    'foul_reason' => self::TIMEOUT_FOUL_REASON,
+                    'submitted_at' => now(),
+                ])->save();
+
+                $this->audit->game($game, 'hand.timed_out', [
+                    'game_player_id' => $player->id,
+                    'user_id' => $player->user_id,
+                ]);
+            }
+
+            if ($missing->isNotEmpty()) {
+                event(new AllHandsSubmitted($game->id));
+            }
+
+            return $this->evaluate($game);
         });
     }
 
@@ -352,14 +451,16 @@ class GameService
 
             GameCard::query()->where('game_id', $game->id)->whereNull('revealed_at')->update(['revealed_at' => now()]);
 
-            $settled = $this->settlements->settle($game, $lines);
+            $this->settlements->settle($game, $lines);
 
             event(new GameEvaluated($game->id, $result->players));
             event(new GameCompleted($game->id, $game->room_id));
 
             // Keep the same seats for another round: everyone just has to ready
-            // up again, and anyone who leaves frees their seat.
-            if ($settled) {
+            // up again, and anyone who leaves frees their seat. The table is
+            // reset even when cash settlement is blocked, otherwise the room
+            // would stay "in progress" forever and trap every player in it.
+            if ($game->room !== null) {
                 $this->rooms->resetForNextRound($game->room);
             }
 
@@ -377,7 +478,7 @@ class GameService
             event(new SettlementCompleted(
                 $game->id,
                 $winnerId,
-                $result->netPointsMinor[$winnerId] ?? 0
+                $winnerId !== null ? ($lines[$winnerId]['net_minor'] ?? 0) : 0
             ));
 
             $this->audit->game($game, 'game.evaluated', ['game_points' => $result->gamePoints()]);

@@ -445,3 +445,152 @@ test('a submitted hand may contain a ten card', function () {
     $response->assertSessionHasNoErrors();
     $response->assertSessionHas('error', 'The submitted cards do not match the cards that were dealt to you.');
 });
+
+test('an expired arrangement auto-fouls the missing player and completes the round', function () {
+    $room = Room::query()->where('slug', 'bronze-table')->firstOrFail();
+    $rooms = app(RoomService::class);
+    $games = app(GameService::class);
+
+    $users = collect(range(1, 4))->map(fn () => fundedUser(100_000));
+
+    foreach ($users as $user) {
+        $rooms->join($user, $room);
+        $rooms->ready($user, $room);
+    }
+
+    $game = $games->start($room);
+
+    foreach ($users->take(3) as $user) {
+        $games->submit($game->refresh(), $user, dealtHandCodes($game->refresh(), $user));
+    }
+
+    // Nothing happens while the table still has time on the clock.
+    expect($games->resolveDeadline($game->refresh()))->toBeNull();
+    expect($game->refresh()->status)->toBe(GameStatus::Arranging);
+
+    $game->forceFill(['arrangement_deadline_at' => now()->subSecond()])->save();
+
+    $result = $games->resolveDeadline($game->refresh());
+
+    expect($result)->not->toBeNull();
+
+    $game->refresh();
+
+    expect($game->status)->toBe(GameStatus::Completed);
+
+    $timedOut = $game->players()->where('user_id', $users->last()->id)->firstOrFail();
+
+    expect($timedOut->is_fouled)->toBeTrue();
+    expect($timedOut->foul_reason)->toBe(GameService::TIMEOUT_FOUL_REASON);
+    expect($timedOut->submission)->not->toBeNull();
+    expect($timedOut->submission->is_valid)->toBeFalse();
+    expect((int) $game->playerResults()->sum('game_points'))->toBe(0);
+    expect($room->refresh()->status)->toBe(RoomStatus::Filling);
+
+    // Repeated sweeps and late clicks must not evaluate the game twice.
+    expect($games->resolveDeadline($game->refresh()))->toBeNull();
+    expect($game->handResults()->count())->toBe(18);
+});
+
+test('a hand submitted after the deadline is rejected', function () {
+    $room = Room::query()->where('slug', 'bronze-table')->firstOrFail();
+    $rooms = app(RoomService::class);
+    $games = app(GameService::class);
+
+    $users = collect(range(1, 4))->map(fn () => fundedUser(100_000));
+
+    foreach ($users as $user) {
+        $rooms->join($user, $room);
+        $rooms->ready($user, $room);
+    }
+
+    $game = $games->start($room);
+    $game->forceFill(['arrangement_deadline_at' => now()->subSecond()])->save();
+
+    $hands = dealtHandCodes($game->refresh(), $users->first());
+
+    expect(fn () => $games->submit($game->refresh(), $users->first(), $hands))
+        ->toThrow(RuntimeException::class, 'The arrangement deadline has passed.');
+});
+
+test('a completed game returns the table to the lobby even when settlement is blocked', function () {
+    $room = Room::query()->where('slug', 'bronze-table')->firstOrFail();
+    $rooms = app(RoomService::class);
+
+    $users = collect(range(1, 4))->map(fn () => fundedUser(100_000));
+
+    $this->mock(SettlementService::class, function ($mock) {
+        $mock->shouldReceive('settle')->once()->andReturn(false);
+    });
+
+    $games = app(GameService::class);
+
+    foreach ($users as $user) {
+        $rooms->join($user, $room);
+        $rooms->ready($user, $room);
+    }
+
+    $game = $games->start($room);
+
+    foreach ($users as $user) {
+        $games->submit($game->refresh(), $user, dealtHandCodes($game->refresh(), $user));
+    }
+
+    $game->refresh();
+
+    expect($game->status)->toBe(GameStatus::Completed);
+    expect($game->isSettled())->toBeFalse();
+    expect($room->refresh()->status)->toBe(RoomStatus::Filling);
+
+    // Nobody stays trapped in an in-progress room, and no funds stay reserved.
+    expect($users->first()->wallet->refresh()->reserved_minor)->toBe(0);
+});
+
+test('the scheduler sweep resolves an abandoned table', function () {
+    $room = Room::query()->where('slug', 'bronze-table')->firstOrFail();
+    $rooms = app(RoomService::class);
+
+    $users = collect(range(1, 4))->map(fn () => fundedUser(100_000));
+
+    foreach ($users as $user) {
+        $rooms->join($user, $room);
+        $rooms->ready($user, $room);
+    }
+
+    $game = app(GameService::class)->start($room);
+    $game->forceFill(['arrangement_deadline_at' => now()->subMinute()])->save();
+
+    $this->artisan('games:resolve-expired')->assertSuccessful();
+
+    $game->refresh();
+
+    expect($game->status)->toBe(GameStatus::Completed);
+    expect($game->players()->where('is_fouled', true)->count())->toBe(4);
+    expect($room->refresh()->status)->toBe(RoomStatus::Filling);
+});
+
+test('only a seated player can trigger timeout resolution and never before the deadline', function () {
+    $room = Room::query()->where('slug', 'bronze-table')->firstOrFail();
+    $rooms = app(RoomService::class);
+
+    $users = collect(range(1, 4))->map(fn () => fundedUser(100_000));
+    $outsider = fundedUser(100_000);
+
+    foreach ($users as $user) {
+        $rooms->join($user, $room);
+        $rooms->ready($user, $room);
+    }
+
+    $game = app(GameService::class)->start($room);
+
+    $this->actingAs($outsider)
+        ->post(route('games.timeout', $game))
+        ->assertForbidden();
+
+    // A seated player cannot force resolution while the clock is still running.
+    $this->actingAs($users->first())
+        ->post(route('games.timeout', $game))
+        ->assertRedirect();
+
+    expect($game->refresh()->status)->toBe(GameStatus::Arranging);
+});

@@ -1,5 +1,5 @@
 import { Head, router, usePage } from '@inertiajs/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import AuthenticatedLayout from '../../Layouts/AuthenticatedLayout';
 import { echo } from '../../echo';
 
@@ -12,13 +12,16 @@ const POSITIONS = [
   { key: 'front', label: 'Front', hint: '3 cards · weakest' },
 ];
 
-function CardTile({ card, onClick, selected, draggable = true }) {
+function CardTile({ card, onClick, selected, draggable = true, label }) {
   return (
     <button
       type="button"
       draggable={draggable}
       onDragStart={(event) => event.dataTransfer.setData('text/plain', card.code)}
       onClick={onClick}
+      aria-pressed={selected}
+      aria-label={label ?? `${card.rank_label} of ${SUIT_SYMBOLS[card.suit]}`}
+      style={{ touchAction: 'manipulation' }}
       className={`flex h-24 w-16 flex-col items-center justify-center rounded-xl border bg-white text-lg font-semibold shadow-theme-xs transition dark:bg-gray-900 ${
         selected ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-gray-200 hover:-translate-y-1 dark:border-gray-700'
       } ${SUIT_COLORS[card.suit]}`}
@@ -29,9 +32,55 @@ function CardTile({ card, onClick, selected, draggable = true }) {
   );
 }
 
-export default function Table({ game, me, seats, room_id: roomId, rematch, next_game: nextGame }) {
+const formatClock = (seconds) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+const HAND_LIMITS = { back: 5, middle: 5, front: 3 };
+
+/**
+ * Restore an unsaved arrangement after a refresh or a dropped connection.
+ * A draft is ignored unless every card still belongs to this game and no card
+ * is used twice, so a stale draft can never corrupt a new hand.
+ */
+function readDraft(key, fallback, cards) {
+  try {
+    const raw = window.localStorage.getItem(key);
+
+    if (!raw) return fallback;
+
+    const draft = JSON.parse(raw);
+    const known = new Set(cards.map((card) => card.code));
+    const seen = new Set();
+
+    for (const [position, limit] of Object.entries(HAND_LIMITS)) {
+      const list = draft?.[position];
+
+      if (!Array.isArray(list) || list.length > limit) return fallback;
+
+      for (const code of list) {
+        if (!known.has(code) || seen.has(code)) return fallback;
+        seen.add(code);
+      }
+    }
+
+    return { back: draft.back, middle: draft.middle, front: draft.front };
+  } catch {
+    return fallback;
+  }
+}
+
+const clearDraft = (key) => {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Storage can be unavailable (private mode); the draft is a convenience only.
+  }
+};
+
+export default function Table({ game, me, seats, room_id: roomId, rematch, next_game: nextGame, server_now: serverNow }) {
   const { props } = usePage();
   const cards = props.cards ?? [];
+  const results = props.results;
+  const [connection, setConnection] = useState('connected');
 
   // Live updates: submissions, evaluation, and rematch readiness.
   useEffect(() => {
@@ -73,6 +122,30 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
     };
   }, [game.id, roomId]);
 
+  // Reconnection: show an honest banner and resync from the server as soon as
+  // the socket comes back, because events sent while offline were missed.
+  useEffect(() => {
+    const pusher = echo?.connector?.pusher;
+
+    if (!pusher?.connection) {
+      return undefined;
+    }
+
+    const onStateChange = (states) => {
+      const current = states?.current ?? pusher.connection.state;
+      setConnection(current);
+
+      if (current === 'connected') {
+        router.reload({ only: ['seats', 'me', 'results', 'game', 'next_game', 'server_now'], preserveScroll: true });
+      }
+    };
+
+    setConnection(pusher.connection.state);
+    pusher.connection.bind('state_change', onStateChange);
+
+    return () => pusher.connection.unbind('state_change', onStateChange);
+  }, []);
+
   // A new round started while this player was still looking at the results.
   useEffect(() => {
     if (nextGame) {
@@ -107,33 +180,100 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
     return layout;
   }, [cards]);
 
-  const [hands, setHands] = useState(initial);
+  const draftKey = `pepito.hands.${game.id}.${me.game_player_id}`;
+  const [hands, setHands] = useState(() => (me.submitted ? initial : readDraft(draftKey, initial, cards)));
   const [selected, setSelected] = useState(null);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const [serverOffset, setServerOffset] = useState(0);
+  const timeoutRequested = useRef(false);
+
+  // A wrong device clock must not change the deadline, so the countdown is
+  // anchored to the server timestamp sent with the page.
+  useEffect(() => {
+    setServerOffset(serverNow ? new Date(serverNow).getTime() - Date.now() : 0);
+  }, [serverNow]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (me.submitted || typeof window === 'undefined') return;
+
+    try {
+      window.localStorage.setItem(draftKey, JSON.stringify(hands));
+    } catch {
+      // The draft is a convenience only; private mode can reject storage.
+    }
+  }, [hands, draftKey, me.submitted]);
+
+  useEffect(() => {
+    if (results) clearDraft(draftKey);
+  }, [results, draftKey]);
+
+  const secondsLeft = useMemo(() => {
+    if (!game.deadline || results) return null;
+
+    const deadline = new Date(game.deadline).getTime();
+    const serverEstimate = now + serverOffset;
+
+    return Math.max(0, Math.ceil((deadline - serverEstimate) / 1000));
+  }, [game.deadline, now, serverOffset, results]);
+
+  const expired = secondsLeft === 0 && game.status === 'arranging' && !results;
+
+  useEffect(() => {
+    timeoutRequested.current = false;
+  }, [game.id, game.deadline]);
+
+  // Resolve the round as soon as the countdown ends. The server re-checks the
+  // deadline, so this cannot force an early resolution; if every client is
+  // gone, the games:resolve-expired scheduler command is the backstop.
+  useEffect(() => {
+    if (!expired || timeoutRequested.current) return;
+
+    timeoutRequested.current = true;
+    router.post(`/games/${game.id}/timeout`, {}, { preserveScroll: true, preserveState: true });
+  }, [expired, game.id]);
+
+  // Keep polling until the server has resolved the round.
+  useEffect(() => {
+    if (!expired) return undefined;
+
+    const timer = setInterval(() => {
+      router.reload({ only: ['seats', 'me', 'results', 'game', 'server_now'], preserveScroll: true });
+    }, 3000);
+
+    return () => clearInterval(timer);
+  }, [expired]);
 
   const byCode = useMemo(() => Object.fromEntries(cards.map((card) => [card.code, card])), [cards]);
   const assigned = Object.values(hands).flat();
+  const submittedCount = seats.filter((seat) => seat.submitted).length;
+  const connectionLost = ['disconnected', 'unavailable', 'failed'].includes(connection);
 
   const place = (position, code = selected) => {
     if (!code) return;
-    const limit = position === 'front' ? 3 : 5;
 
-    setHands((current) => {
-      const next = { back: [...current.back], middle: [...current.middle], front: [...current.front] };
-      Object.keys(next).forEach((key) => {
-        next[key] = next[key].filter((item) => item !== code);
-      });
+    const limit = HAND_LIMITS[position];
+    const next = {
+      back: hands.back.filter((item) => item !== code),
+      middle: hands.middle.filter((item) => item !== code),
+      front: hands.front.filter((item) => item !== code),
+    };
 
-      if (next[position].length >= limit) {
-        setError(`${position} already has ${limit} cards.`);
-        return current;
-      }
+    if (next[position].length >= limit) {
+      setError(`${position} already has ${limit} cards.`);
+      return;
+    }
 
-      next[position].push(code);
-      return next;
-    });
-
+    next[position] = [...next[position], code];
+    setHands(next);
     setSelected(null);
+    setError('');
   };
 
   const drop = (event, position) => {
@@ -151,19 +291,32 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
       ...current,
       [position]: current[position].filter((item) => item !== code),
     }));
+    setError('');
   };
 
   const submit = () => {
+    if (submitting || me.submitted || expired) return;
+
     if (hands.back.length !== 5 || hands.middle.length !== 5 || hands.front.length !== 3) {
       setError('The back and middle hands need 5 cards each and the front hand needs 3.');
       return;
     }
 
     setError('');
-    router.post(`/games/${game.id}/hands`, hands, { preserveScroll: true });
-  };
+    setSubmitting(true);
 
-  const results = props.results;
+    router.post(`/games/${game.id}/hands`, hands, {
+      preserveScroll: true,
+      onSuccess: (page) => {
+        // Validation errors keep the draft so nothing is lost; any accepted
+        // submission (including a foul) locks the hand in and clears it.
+        if (Object.keys(page?.props?.errors ?? {}).length === 0) {
+          clearDraft(draftKey);
+        }
+      },
+      onFinish: () => setSubmitting(false),
+    });
+  };
   const errors = props.errors ?? {};
   const serverError = errors.back || errors.middle || errors.front || Object.values(errors)[0];
 
@@ -178,13 +331,24 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
               <h1 className="text-xl font-semibold text-gray-800 dark:text-white/90">{game.room}</h1>
               <p className="text-theme-sm text-gray-500 dark:text-gray-400">
                 {game.code} · <span className="capitalize">{game.status.replace('_', ' ')}</span>
-                {game.deadline && ` · arrange by ${new Date(game.deadline).toLocaleTimeString()}`}
+                {game.deadline && !results && ` · arrange by ${new Date(game.deadline).toLocaleTimeString()}`}
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full bg-gray-100 px-3 py-1 text-theme-xs font-medium text-gray-600 dark:bg-white/5 dark:text-gray-300">
-                Seat {me.seat}
+                Seat {me.seat} · {submittedCount}/{seats.length} submitted
               </span>
+              {secondsLeft !== null && (
+                <span
+                  className={`rounded-full px-3 py-1 text-theme-xs font-semibold tabular-nums ${
+                    secondsLeft <= 20
+                      ? 'bg-error-50 text-error-600 dark:bg-error-500/15 dark:text-error-400'
+                      : 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-400'
+                  }`}
+                >
+                  {secondsLeft > 0 ? `${formatClock(secondsLeft)} left` : 'Time expired'}
+                </span>
+              )}
               {me.submitted && (
                 <span className="rounded-full bg-success-50 px-3 py-1 text-theme-xs font-semibold text-success-600">
                   Hands submitted
@@ -197,6 +361,18 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
               )}
             </div>
           </div>
+
+          {connectionLost && (
+            <div className="mb-4 rounded-xl border border-warning-200 bg-warning-50 px-4 py-3 text-theme-sm text-warning-700 dark:border-warning-500/30 dark:bg-warning-500/10 dark:text-warning-400">
+              Connection lost — reconnecting. Your cards and submitted hands are safe; the table resyncs automatically.
+            </div>
+          )}
+
+          {expired && !me.submitted && (
+            <div className="mb-4 rounded-xl border border-error-200 bg-error-50 px-4 py-3 text-theme-sm text-error-600 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-400">
+              Time is up. The server is resolving the round — a hand that was not submitted is scored as a foul.
+            </div>
+          )}
 
           <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
             {seats.map((seat) => (
@@ -274,9 +450,10 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
                     <button
                       type="button"
                       onClick={() => place(position.key)}
-                      className="mt-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-theme-xs font-medium text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-white/5"
+                      disabled={!selected || hands[position.key].length >= (position.key === 'front' ? 3 : 5)}
+                      className="mt-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-theme-xs font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-white/5"
                     >
-                      Place selected card here
+                      {selected ? 'Place selected card here' : 'Select a card first'}
                     </button>
                   </div>
                 ))}
@@ -289,10 +466,10 @@ export default function Table({ game, me, seats, room_id: roomId, rematch, next_
               <button
                 type="button"
                 onClick={submit}
-                disabled={me.submitted}
+                disabled={me.submitted || submitting || expired}
                 className="rounded-lg bg-brand-500 px-6 py-3 text-theme-sm font-semibold text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {me.submitted ? 'Hands submitted' : 'Submit hands'}
+                {me.submitted ? 'Hands submitted' : submitting ? 'Submitting…' : expired ? 'Time expired' : 'Submit hands'}
               </button>
             </>
           )}

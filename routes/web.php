@@ -39,6 +39,10 @@ Route::middleware('auth')->group(function () {
     // Poker table, hand submission and results.
     Route::get('/games/{game}', [GameController::class, 'show'])->name('games.show');
     Route::post('/games/{game}/hands', [GameController::class, 'submit'])->name('games.submit');
+    // A seated player may ask the server to resolve an expired round; the
+    // server re-checks the deadline, so the client cannot force anything early.
+    Route::post('/games/{game}/timeout', [GameController::class, 'resolveTimeout'])
+        ->middleware('throttle:12,1')->name('games.timeout');
 
     // History and wallet.
     Route::get('/history', [HistoryController::class, 'index'])->name('history');

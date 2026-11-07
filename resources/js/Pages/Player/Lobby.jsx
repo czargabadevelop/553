@@ -14,7 +14,6 @@ export default function Lobby({ rooms }) {
     setLiveRooms(rooms);
   }, [rooms]);
 
-  const seatedInRoom = liveRooms.some((room) => room.my_seat);
   const activeGame = liveRooms.find((room) => room.my_seat && room.active_game)?.active_game ?? null;
 
   useEffect(() => {
@@ -46,18 +45,15 @@ export default function Lobby({ rooms }) {
   }, []);
 
   // Safety net: the socket gives instant updates, this slow poll guarantees the
-  // seat counts can never stay stale (missed event, dropped connection, etc.).
+  // seat counts can never stay stale (missed event, dropped connection, or a
+  // spectator who never subscribed to a room channel).
   useEffect(() => {
-    if (!seatedInRoom || activeGame) {
-      return undefined;
-    }
-
     const timer = setInterval(() => {
       router.reload({ only: ['rooms'], preserveScroll: true, preserveState: true });
-    }, 10000);
+    }, 15000);
 
     return () => clearInterval(timer);
-  }, [seatedInRoom, activeGame]);
+  }, []);
 
   // When the last player readies up, walk every seated player to the table.
   useEffect(() => {
@@ -141,7 +137,7 @@ export default function Lobby({ rooms }) {
                       </button>
                     )}
 
-                    {seated && (
+                    {seated && !room.active_game && (
                       <button
                         type="button"
                         onClick={() => act(`/lobby/${room.id}/leave`)}
