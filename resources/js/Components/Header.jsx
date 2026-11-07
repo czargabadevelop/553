@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, router, usePage } from '@inertiajs/react';
+import BrandMark from './BrandMark';
 import { useTheme } from '../lib/ThemeContext';
 import useClickOutside from '../lib/useClickOutside';
 import {
@@ -12,6 +13,7 @@ import {
   IconMoon,
   IconSearch,
   IconSun,
+  IconUsers,
 } from './Icons';
 
 export default function Header({ sidebarToggle, onToggleSidebar }) {
@@ -42,7 +44,13 @@ export default function Header({ sidebarToggle, onToggleSidebar }) {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const avatar = user?.profile_picture ? `/storage/${user.profile_picture}` : '/images/xiv/xiv.jpg';
+  const avatar = user?.profile_picture ? `/storage/${user.profile_picture}` : null;
+  const initials = (user?.name || user?.username || '?')
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join('');
 
   const logout = () => {
     router.post('/logout');
@@ -69,8 +77,7 @@ export default function Header({ sidebarToggle, onToggleSidebar }) {
           {/* Hamburger Toggle BTN */}
 
           <Link href="/dashboard" className="lg:hidden">
-            <img className="dark:hidden" src="/images/logo/logo.svg" alt="Logo" />
-            <img className="hidden dark:block" src="/images/logo/logo-dark.svg" alt="Logo" />
+            <BrandMark />
           </Link>
 
           {/* Application nav menu button */}
@@ -128,8 +135,8 @@ export default function Header({ sidebarToggle, onToggleSidebar }) {
               onClick={() => setDropdownOpen((value) => !value)}
               className="flex items-center text-gray-700 dark:text-gray-400"
             >
-              <span className="mr-3 h-11 w-11 overflow-hidden rounded-full">
-                <img src={avatar} alt="User" />
+              <span className="mr-3 flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-brand-500 text-theme-sm font-semibold text-white">
+                {avatar ? <img src={avatar} alt="User" className="h-full w-full object-cover" /> : initials}
               </span>
 
               <span className="text-theme-sm mr-1 block font-medium">
@@ -157,7 +164,7 @@ export default function Header({ sidebarToggle, onToggleSidebar }) {
                   {user && (
                     <li>
                       <Link
-                        href={`/crud/${user.id}/edit`}
+                        href="/profile"
                         className="group text-theme-sm flex items-center gap-3 rounded-lg px-3 py-2 font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-300"
                       >
                         <IconUsers className="fill-gray-500 group-hover:fill-gray-700 dark:fill-gray-400 dark:group-hover:fill-gray-300" />

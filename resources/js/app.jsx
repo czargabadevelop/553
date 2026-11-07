@@ -5,7 +5,7 @@ import { createInertiaApp } from '@inertiajs/react';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from './lib/ThemeContext';
 
-const appName = import.meta.env.VITE_APP_NAME || 'Pepito';
+const appName = import.meta.env.VITE_APP_NAME || 'Card Casino';
 
 createInertiaApp({
   title: (title) => (title ? `${title} | ${appName}` : appName),

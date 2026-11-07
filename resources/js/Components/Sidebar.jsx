@@ -1,4 +1,5 @@
 import { Link, usePage } from '@inertiajs/react';
+import BrandMark from './BrandMark';
 import { IconGrid, IconMenuDots, IconUsers } from './Icons';
 
 const playerItems = [
@@ -53,12 +54,7 @@ export default function Sidebar({ sidebarToggle }) {
     >
       <div className={`sidebar-header flex items-center gap-2 pb-7 pt-8 ${sidebarToggle ? 'justify-center' : 'justify-between'}`}>
         <Link href="/dashboard">
-          <span className={`logo ${sidebarToggle ? 'hidden' : ''}`}>
-            <img className="dark:hidden" src="/images/logo/logo.svg" alt="Logo" />
-            <img className="hidden dark:block" src="/images/logo/logo-dark.svg" alt="Logo" />
-          </span>
-
-          <img className={`logo-icon ${sidebarToggle ? 'lg:block' : 'hidden'}`} src="/images/logo/logo-icon.svg" alt="Logo" />
+          <BrandMark compact={sidebarToggle} />
         </Link>
       </div>
 
