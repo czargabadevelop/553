@@ -1,0 +1,116 @@
+stages:
+  - install
+  - quality
+  - test
+  - build
+  - deploy
+
+variables:
+  COMPOSER_CACHE_DIR: "$CI_PROJECT_DIR/.composer-cache"
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-cache"
+
+default:
+  image: php:8.4-cli
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .composer-cache/
+      - .npm-cache/
+      - vendor/
+      - node_modules/
+
+install:
+  stage: install
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git unzip libzip-dev libicu-dev >/dev/null
+    - docker-php-ext-install -j$(nproc) bcmath intl zip pdo_mysql >/dev/null
+    - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+  script:
+    - composer install --no-interaction --prefer-dist --no-progress
+    - node --version
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - vendor/
+
+php-syntax:
+  stage: quality
+  needs: ['install']
+  script:
+    - find app routes database tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+    - echo "PHP syntax OK"
+
+pint:
+  stage: quality
+  needs: ['install']
+  script:
+    - vendor/bin/pint --test --format=gitlab > gl-code-quality-report.json || (cat gl-code-quality-report.json; exit 1)
+  artifacts:
+    when: always
+    reports:
+      codequality: gl-code-quality-report.json
+
+pest:
+  stage: test
+  needs: ['install']
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq libsqlite3-dev >/dev/null
+    - docker-php-ext-install pdo_sqlite >/dev/null
+    - cp .env.example .env
+    - php artisan key:generate
+  script:
+    - php artisan test --compact
+  artifacts:
+    when: always
+
+frontend-build:
+  stage: build
+  image: node:22-alpine
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run build
+  artifacts:
+    paths:
+      - public/build/
+    expire_in: 1 week
+
+image:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --target app -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    - docker build --target web -t "$CI_REGISTRY_IMAGE-web:$CI_COMMIT_SHA" -t "$CI_REGISTRY_IMAGE-web:latest" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+    - docker push "$CI_REGISTRY_IMAGE-web:$CI_COMMIT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE-web:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  needs: ['image']
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+  script:
+    # Pull, migrate explicitly (never destructive), restart, verify health.
+    - ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_PATH && \
+        export IMAGE_TAG=$CI_COMMIT_SHA && \
+        docker compose pull && \
+        docker compose run --rm app php artisan migrate --force && \
+        docker compose up -d && \
+        sleep 10 && \
+        curl -fsS https://\$APP_DOMAIN/up || (echo 'Health check failed, rolling back' && docker compose down && exit 1)"
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual

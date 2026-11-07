@@ -1,0 +1,22 @@
+.git
+.gitlab
+.github
+node_modules
+vendor
+public/build
+# Never bake locally generated container caches (packages/services/config/routes)
+# into the image: they can reference dev-only packages such as laravel/boost,
+# which are not installed with `composer install --no-dev`.
+bootstrap/cache/*.php
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+storage/app/*
+.env
+.env.*
+!.env.production.example
+tests
+docs
+*.log
+.DS_Store

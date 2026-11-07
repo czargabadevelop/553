@@ -1,6 +1,9 @@
 <?php
 
+use App\Enums\RoleSlug;
+use App\Models\Role;
 use App\Models\User;
+use Database\Seeders\RolePermissionSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Inertia\Testing\AssertableInertia as Assert;
 
@@ -8,7 +11,19 @@ uses(RefreshDatabase::class);
 
 beforeEach(function () {
     $this->withoutVite();
+    $this->seed(RolePermissionSeeder::class);
 });
+
+/**
+ * The starter CRUD screens are now restricted to super administrators.
+ */
+function adminUser(): User
+{
+    $user = User::factory()->create(['role' => 'admin']);
+    $user->roles()->attach(Role::query()->where('slug', RoleSlug::SuperAdministrator->value)->firstOrFail());
+
+    return $user;
+}
 
 test('guests are redirected away from protected pages', function () {
     $this->get('/dashboard')->assertRedirect('/');
@@ -54,13 +69,13 @@ test('the dashboard renders for authenticated users', function () {
     $this->actingAs(User::factory()->create())
         ->get('/dashboard')
         ->assertOk()
-        ->assertInertia(fn (Assert $page) => $page->component('Dashboard'));
+        ->assertInertia(fn (Assert $page) => $page->component('Player/Dashboard'));
 });
 
 test('the users index lists users through inertia', function () {
     User::factory()->count(3)->create();
 
-    $this->actingAs(User::factory()->create())
+    $this->actingAs(adminUser())
         ->get('/crud')
         ->assertOk()
         ->assertInertia(fn (Assert $page) => $page
@@ -71,7 +86,7 @@ test('the users index lists users through inertia', function () {
 
 test('the create, edit and show pages render through inertia', function () {
     $target = User::factory()->create(['username' => 'target']);
-    $admin = User::factory()->create(['role' => 'admin']);
+    $admin = adminUser();
 
     $this->actingAs($admin)->get('/crud/create')
         ->assertOk()
@@ -93,7 +108,7 @@ test('the create, edit and show pages render through inertia', function () {
 });
 
 test('an admin can create, update and delete a user', function () {
-    $admin = User::factory()->create(['role' => 'admin']);
+    $admin = adminUser();
 
     $this->actingAs($admin)->post('/crud', [
         'name' => 'New Person',
@@ -122,7 +137,7 @@ test('an admin can create, update and delete a user', function () {
 });
 
 test('creating a user validates required fields', function () {
-    $admin = User::factory()->create(['role' => 'admin']);
+    $admin = adminUser();
 
     $this->actingAs($admin)->post('/crud', [])
         ->assertSessionHasErrors(['name', 'username', 'email', 'role', 'password']);

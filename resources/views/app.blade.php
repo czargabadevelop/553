@@ -7,7 +7,12 @@
       content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
     />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
-    <title inertia>{{ config('app.name', 'TailAdmin') }}</title>
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <meta name="reverb-key" content="{{ config('broadcasting.connections.reverb.key') }}" />
+    <meta name="reverb-host" content="{{ config('broadcasting.client.host') }}" />
+    <meta name="reverb-port" content="{{ config('broadcasting.client.port') }}" />
+    <meta name="reverb-scheme" content="{{ config('broadcasting.client.scheme') }}" />
+    <title inertia>{{ config('app.name', 'Pepito') }}</title>
     <script>
       // Applied before paint so dark mode does not flash on first load.
       try {

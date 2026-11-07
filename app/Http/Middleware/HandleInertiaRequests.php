@@ -28,6 +28,7 @@ class HandleInertiaRequests extends Middleware
     public function share(Request $request): array
     {
         $user = $request->user();
+        $wallet = $user?->wallet;
 
         return array_merge(parent::share($request), [
             'auth' => [
@@ -37,11 +38,23 @@ class HandleInertiaRequests extends Middleware
                     'username' => $user->username,
                     'email' => $user->email,
                     'role' => $user->role,
+                    'roles' => $user->roles->pluck('slug')->all(),
                     'profile_picture' => $user->profile_picture,
+                    'account_status' => $user->account_status?->value,
+                    'verification_status' => $user->verification?->status?->value,
+                ] : null,
+                'wallet' => $wallet ? [
+                    'available_minor' => $wallet->available_minor,
+                    'reserved_minor' => $wallet->reserved_minor,
+                    'available' => $wallet->available()->toDecimalString(),
+                    'reserved' => $wallet->reserved()->toDecimalString(),
+                    'currency' => $wallet->currency,
+                    'is_test_credit' => $wallet->is_test_credit,
                 ] : null,
             ],
             'flash' => [
                 'success' => fn () => $request->session()->get('success'),
+                'error' => fn () => $request->session()->get('error'),
             ],
         ]);
     }

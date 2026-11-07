@@ -1,10 +1,11 @@
 import './bootstrap';
+import './echo';
 
 import { createInertiaApp } from '@inertiajs/react';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from './lib/ThemeContext';
 
-const appName = import.meta.env.VITE_APP_NAME || 'TailAdmin';
+const appName = import.meta.env.VITE_APP_NAME || 'Pepito';
 
 createInertiaApp({
   title: (title) => (title ? `${title} | ${appName}` : appName),

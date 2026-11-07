@@ -1,0 +1,104 @@
+name: poker
+
+x-app: &app
+  build:
+    context: .
+    target: app
+  image: ${APP_IMAGE:-poker-app}:${IMAGE_TAG:-latest}
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - app_storage:/var/www/html/storage/app
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 9000) ? 0 : 1);"]
+    interval: 30s
+    timeout: 5s
+    retries: 5
+
+services:
+  # Nginx: public HTTP entrypoint. Serves /public and proxies PHP to `app`.
+  web:
+    build:
+      context: .
+      target: web
+    image: ${WEB_IMAGE:-poker-web}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${APP_HTTP_PORT:-8000}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/up"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  app:
+    <<: *app
+    ports:
+      # Only the host reverse proxy (aaPanel Nginx) should reach PHP-FPM.
+      - "127.0.0.1:9000:9000"
+
+  queue:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "--tries=3", "--timeout=90", "--sleep=1"]
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *app
+    command: ["sh", "-c", "while true; do php artisan schedule:run --no-interaction; sleep 60; done"]
+    healthcheck:
+      disable: true
+
+  reverb:
+    <<: *app
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    ports:
+      - "127.0.0.1:${REVERB_PUBLISH_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 8080) ? 0 : 1);"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Never publish MySQL to the internet.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Never publish Redis to the internet.
+
+volumes:
+  mysql_data:
+  redis_data:
+  app_storage:
